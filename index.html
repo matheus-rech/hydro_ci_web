@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0d1117">
+  <title>HydroMorph — Hydrocephalus Morphometrics</title>
+  <meta name="description" content="Browser-based hydrocephalus morphometrics pipeline. Evans Index, Callosal Angle, Ventricle Volume — all computed locally from your NIfTI CT scan.">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800;1,9..40,400&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- pako for gzip decompression -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js" crossorigin="anonymous"></script>
+
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       SCREEN 1: UPLOAD
+  ═══════════════════════════════════════════════════════════════ -->
+  <section id="screen-upload" class="screen">
+    <div class="upload-header">
+      <div class="logo-mark">
+        <span class="logo-icon">🧠</span>
+      </div>
+      <h1 class="app-title">HydroMorph</h1>
+      <p class="app-subtitle">Hydrocephalus Morphometrics Pipeline</p>
+    </div>
+
+    <!-- Drop Zone -->
+    <div id="drop-zone" class="drop-zone tap-target" role="button" tabindex="0"
+         aria-label="Upload a NIfTI head CT scan">
+      <div class="drop-icon">⬆</div>
+      <div class="drop-title">Tap to select a head CT scan</div>
+      <div class="drop-hint">
+        Or drag and drop your file here.<br>
+        No data ever leaves your device.
+      </div>
+      <div class="drop-formats">
+        <span class="format-badge">.nii</span>
+        <span class="format-badge">.nii.gz</span>
+      </div>
+      <input type="file" id="file-input" accept=".nii,.nii.gz,application/gzip"
+             style="display:none" aria-hidden="true">
+    </div>
+
+    <!-- Privacy -->
+    <div class="privacy-strip">
+      <span class="privacy-icon">🔒</span>
+      <span><strong>100% Client-Side</strong> — All processing happens in your browser. Zero server uploads.</span>
+    </div>
+
+    <!-- Error display -->
+    <div id="upload-error" class="upload-error" role="alert" aria-live="polite"></div>
+
+    <!-- Sample data (coming soon) -->
+    <button class="sample-btn" id="sample-btn">
+      <span>📂</span>
+      <span>Try with sample CT scan</span>
+    </button>
+
+    <!-- Footer -->
+    <div class="upload-footer">
+      <div>Supports NIfTI-1 format · Head CT in Hounsfield Units</div>
+      <div style="margin-top:6px">
+        Built by <strong style="color:var(--accent)">Matheus Machado Rech</strong>
+      </div>
+      <div style="margin-top:6px; opacity:0.5; font-size:11px">
+        Research use only · Not for clinical diagnosis
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       SCREEN 2: PROCESSING
+  ═══════════════════════════════════════════════════════════════ -->
+  <section id="screen-processing" class="screen">
+    <div class="processing-header">
+      <div class="brain-animation">🧠</div>
+      <div class="processing-title">Analyzing your scan…</div>
+      <div id="processing-filename" class="processing-filename">—</div>
+    </div>
+
+    <!-- Volume metadata (populated as we parse) -->
+    <div id="volume-metadata" class="volume-metadata">
+      <div class="meta-item">
+        <span class="meta-label">Shape</span>
+        <span class="meta-value mono">—</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Spacing</span>
+        <span class="meta-value mono">—</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Datatype</span>
+        <span class="meta-value mono">—</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">File size</span>
+        <span class="meta-value mono">—</span>
+      </div>
+    </div>
+
+    <!-- Step progress -->
+    <div class="progress-container">
+      <div id="progress-steps">
+        <!-- Populated by app.js -->
+      </div>
+      <div id="progress-detail" class="progress-detail">Initializing pipeline…</div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       SCREEN 3: RESULTS
+  ═══════════════════════════════════════════════════════════════ -->
+  <section id="screen-results" class="screen">
+
+    <!-- Sticky top bar -->
+    <div class="results-topbar">
+      <div class="topbar-title">
+        🧠 HydroMorph
+        <span class="topbar-badge">Results</span>
+      </div>
+      <button class="btn btn-danger" id="new-scan-btn-top" onclick="resetApp()" style="min-height:36px;padding:6px 14px;font-size:12px">
+        ↩ New Scan
+      </button>
+    </div>
+
+    <div class="results-content">
+
+      <!-- ── A: NPH Assessment ───────────────────────────────────── -->
+      <div>
+        <div class="section-header">NPH Assessment</div>
+        <div id="nph-badge" class="nph-badge badge-low">
+          <!-- Populated by app.js -->
+          <div class="badge-label">LOW</div>
+          <div class="badge-sub">NPH Probability</div>
+          <div class="badge-pct">0%</div>
+          <div class="badge-score">0/3 criteria met</div>
+        </div>
+      </div>
+
+      <!-- ── B: Key Metrics ─────────────────────────────────────── -->
+      <div>
+        <div class="section-header">Key Metrics</div>
+        <div class="metrics-grid">
+          <div id="card-evans" class="metric-card metric-normal">
+            <div class="metric-value mono">—</div>
+            <div class="metric-label">Evans Index</div>
+            <div class="metric-ref">&gt;0.3 = abnormal</div>
+          </div>
+          <div id="card-angle" class="metric-card metric-normal">
+            <div class="metric-value mono">—</div>
+            <div class="metric-label">Callosal Angle</div>
+            <div class="metric-ref">&lt;90° = abnormal</div>
+          </div>
+          <div id="card-volume" class="metric-card metric-normal">
+            <div class="metric-value mono">—</div>
+            <div class="metric-label">Ventricle Volume</div>
+            <div class="metric-ref">&gt;50 mL = abnormal</div>
+          </div>
+          <div id="card-nph" class="metric-card metric-normal">
+            <div class="metric-value mono">—</div>
+            <div class="metric-label">NPH Probability</div>
+            <div class="metric-ref">criteria score</div>
+          </div>
+        </div>
+
+        <!-- Reference legend -->
+        <div class="ref-legend mt-4">
+          <div class="ref-item"><span class="ref-dot normal"></span> Normal range</div>
+          <div class="ref-item"><span class="ref-dot abnormal"></span> Abnormal range</div>
+          <div class="ref-item"><span class="ref-dot vent"></span> Ventricle overlay</div>
+        </div>
+      </div>
+
+      <!-- ── C: Axial Slice Viewer ──────────────────────────────── -->
+      <div>
+        <div class="section-header">Axial View — Evans Index</div>
+        <div class="viewer-container">
+          <div class="viewer-header">
+            <div class="viewer-title">
+              Axial Slice
+              <span class="viewer-tag">Brain window W:80 L:40</span>
+            </div>
+            <button id="toggle-mask-btn" class="btn btn-active"
+                    style="min-height:32px;padding:5px 12px;font-size:12px">
+              Hide Overlay
+            </button>
+          </div>
+          <div class="viewer-canvas-wrap">
+            <canvas id="axial-canvas" width="256" height="256"
+                    style="max-width:100%;"></canvas>
+          </div>
+          <div class="viewer-controls">
+            <div id="axial-slice-label" class="slice-label">Slice — / —</div>
+            <input type="range" id="axial-slider" min="0" max="255" value="128"
+                   aria-label="Axial slice selector">
+            <div class="angle-legend">
+              <div class="legend-item">
+                <span class="legend-dot" style="background:var(--accent)"></span>
+                Ventricle width (V)
+              </div>
+              <div class="legend-item">
+                <span class="legend-dot" style="background:var(--orange)"></span>
+                Skull width (S)
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── D: Coronal Slice Viewer ────────────────────────────── -->
+      <div>
+        <div class="section-header">Coronal View — Callosal Angle</div>
+        <div class="viewer-container">
+          <div class="viewer-header">
+            <div class="viewer-title">
+              Coronal Slice
+              <span class="viewer-tag">Best cross-section</span>
+            </div>
+          </div>
+          <div class="viewer-canvas-wrap">
+            <canvas id="coronal-canvas" width="256" height="256"
+                    style="max-width:100%;"></canvas>
+          </div>
+          <div class="viewer-controls">
+            <div class="angle-legend">
+              <div class="legend-item">
+                <span class="legend-dot" style="background:var(--cyan)"></span>
+                Vertex
+              </div>
+              <div class="legend-item">
+                <span class="legend-dot" style="background:var(--orange)"></span>
+                L/R points
+              </div>
+              <div class="legend-item">
+                <span class="legend-dot" style="background:var(--cyan); opacity:.5"></span>
+                Angle vectors
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── E: Detailed Measurements Table ────────────────────── -->
+      <div>
+        <div class="section-header">Detailed Measurements</div>
+        <div class="table-wrapper">
+          <div id="measurements-table">
+            <!-- Populated by app.js -->
+          </div>
+        </div>
+      </div>
+
+      <!-- ── F: Sanity Checks ───────────────────────────────────── -->
+      <div>
+        <div class="section-header">Sanity Checks</div>
+        <div id="sanity-checks">
+          <!-- Populated by app.js -->
+        </div>
+      </div>
+
+    </div><!-- /results-content -->
+
+    <!-- New Scan -->
+    <div class="new-scan-row">
+      <button class="btn btn-primary" id="new-scan-btn" style="width:100%;font-size:16px;padding:16px">
+        ↩ Analyze New Scan
+      </button>
+    </div>
+
+    <!-- Footer -->
+    <div class="results-footer">
+      <div class="disclaimer">⚠ Research use only. Not for clinical diagnosis.</div>
+      <div class="version">HydroMorph v2.0.0</div>
+      <div>Matheus Machado Rech</div>
+      <div style="margin-top:4px">
+        Data reference: CADS BrainCT-1mm (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a>)
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ─── Scripts ──────────────────────────────────────────────────── -->
+  <script src="./nifti-reader.js"></script>
+  <script src="./app.js"></script>
+
+  <script>
+    // Connect the "new scan" top button too (in case app.js hasn't bound it yet)
+    document.getElementById('new-scan-btn-top').addEventListener('click', function() {
+      if (typeof resetApp === 'function') resetApp();
+    });
+  </script>
+
+</body>
+</html>
