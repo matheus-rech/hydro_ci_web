@@ -30,12 +30,13 @@ jobs:
       - name: Prepare site files
         run: |
           mkdir -p _site
-          find . -maxdepth 1 -type f \
+          find . -type f \
             \( -name '*.html' -o -name '*.css' -o -name '*.js' -o -name '*.json' -o \
                -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' -o -name '*.gif' -o \
                -name '*.svg' -o -name '*.ico' -o -name '*.webp' -o -name '*.map' -o \
                -name '*.txt' -o -name '*.xml' -o -name '*.woff' -o -name '*.woff2' \) \
-            -exec cp {} _site/ \;
+            ! -path './_site/*' ! -path './_site' \
+            -exec sh -c 'for src in "$@"; do dest="_site/${src#./}"; mkdir -p "$(dirname "$dest")"; cp "$src" "$dest"; done' sh {} +
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
