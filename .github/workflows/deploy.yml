@@ -31,10 +31,11 @@ jobs:
         run: |
           mkdir -p _site
           find . -type f \
-            \( -name '*.html' -o -name '*.css' -o -name '*.js' -o -name '*.json' -o \
+            \( -name '*.html' -o -name '*.css' -o -name '*.js' -o \
                -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' -o -name '*.gif' -o \
                -name '*.svg' -o -name '*.ico' -o -name '*.webp' -o -name '*.map' -o \
-               -name '*.txt' -o -name '*.xml' -o -name '*.woff' -o -name '*.woff2' \) \
+               -name '*.txt' -o -name '*.woff' -o -name '*.woff2' -o \
+               -name 'manifest.json' -o -name 'sitemap.xml' -o -name 'feed.xml' -o -name 'browserconfig.xml' \) \
             ! -path './_site/*' ! -path './_site' \
             -exec sh -c 'for src in "$@"; do dest="_site/${src#./}"; mkdir -p "$(dirname "$dest")"; cp "$src" "$dest"; done' sh {} +
 
