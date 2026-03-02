@@ -8,14 +8,17 @@
 
 // ─── State ──────────────────────────────────────────────────────────────────
 let appState = {
-  screen: 'upload',    // 'upload' | 'processing' | 'results'
-  volume: null,        // { shape, spacing, affine, data, header }
-  mask: null,          // Uint8Array ventricle mask
-  results: null,       // computed metrics
+  screen: 'upload',        // 'upload' | 'processing' | 'results'
+  volume: null,            // { shape, spacing, affine, data, header }
+  mask: null,              // Uint8Array ventricle mask
+  results: null,           // computed metrics
   currentAxialSlice: 0,
   showMask: true,
   fileName: '',
   fileSize: 0,
+  medsam2Available: false, // true when MedSAM2 server is reachable
+  medsam2Box: null,        // { x1, y1, x2, y2, sliceIdx } — optional prompt
+  segmentationMethod: 'threshold', // 'threshold' | 'medsam2'
 };
 
 // ─── Volume Helpers ──────────────────────────────────────────────────────────
@@ -254,7 +257,7 @@ async function delay(ms = 0) {
 
 async function runPipeline(volume) {
   const steps = [
-    'Parsing NIfTI header',
+    'Parsing scan header',
     'Building brain mask',
     'Extracting CSF voxels',
     'Morphological filtering',
@@ -275,6 +278,14 @@ async function runPipeline(volume) {
   advanceProgress(0, `Volume: ${X}×${Y}×${Z}, spacing: ${spacing.map(s=>s.toFixed(2)).join('×')} mm`);
   updateVolumeMetadata(volume);
   await delay(50);
+
+  // Check MedSAM2 server availability in the background (non-blocking)
+  MedSAMClient.checkHealth().then(result => {
+    appState.medsam2Available = result.available;
+    updateServerStatusUI(result.available ? 'connected' : null);
+  }).catch(() => {
+    appState.medsam2Available = false;
+  });
 
   // ── Step 1: Brain mask ─────────────────────────────────────────────────────
   advanceProgress(1, 'Thresholding brain tissue (HU: -5 to 80)...');
@@ -373,8 +384,29 @@ async function runPipeline(volume) {
   await delay(10);
   ventMask = keepLargeComponents(ventMask, shape, minComponentSize);
 
+  // ── Optional: MedSAM2 AI segmentation override ─────────────────────────────
+  if (appState.medsam2Available && appState.medsam2Box) {
+    advanceProgress(4, 'Running MedSAM2 AI segmentation...');
+    try {
+      const aiMask = await MedSAMClient.segment(data, shape, spacing, appState.medsam2Box);
+      // Validate returned mask size
+      if (aiMask && aiMask.length === total) {
+        ventMask = aiMask;
+        appState.segmentationMethod = 'medsam2';
+        advanceProgress(4, 'MedSAM2 segmentation applied.');
+      } else {
+        throw new Error('Mask size mismatch from server.');
+      }
+    } catch (err) {
+      advanceProgress(4, `MedSAM2 failed (${err.message}) — using threshold fallback.`);
+      appState.segmentationMethod = 'threshold';
+    }
+  } else {
+    appState.segmentationMethod = 'threshold';
+  }
+
   const ventCount = ventMask.reduce((a, v) => a + v, 0);
-  advanceProgress(4, `Ventricle voxels: ${ventCount.toLocaleString()}`);
+  advanceProgress(4, `Ventricle voxels: ${ventCount.toLocaleString()} [${appState.segmentationMethod}]`);
   await delay(20);
 
   if (ventCount < 100) {
@@ -818,59 +850,146 @@ function showScreen(name) {
 
 // ─── File Handling ────────────────────────────────────────────────────────────
 
-async function handleFile(file) {
-  if (!file) return;
+/**
+ * Main entry point: route one or more files to the correct handler.
+ */
+async function handleFiles(files) {
+  if (!files || files.length === 0) return;
 
-  const name = file.name.toLowerCase();
-  if (!name.endsWith('.nii') && !name.endsWith('.nii.gz')) {
-    showError('Please select a NIfTI file (.nii or .nii.gz)');
-    return;
+  const fileArray = Array.from(files);
+  const firstFile = fileArray[0];
+  const name = firstFile.name.toLowerCase();
+
+  // NIfTI
+  if (name.endsWith('.nii') || name.endsWith('.nii.gz')) {
+    return handleNiftiFile(firstFile);
   }
 
+  // Explicit DICOM extension
+  if (name.endsWith('.dcm') || firstFile.type === 'application/dicom') {
+    return handleDicomFiles(fileArray);
+  }
+
+  // Multiple files with no clear NIfTI extension → assume DICOM series
+  if (fileArray.length > 1) {
+    return handleDicomFiles(fileArray);
+  }
+
+  // 2D image formats
+  if (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.bmp')) {
+    return handleImageFile(firstFile);
+  }
+
+  // Try to detect DICOM by magic bytes ("DICM" at offset 128)
+  try {
+    const header = new Uint8Array(await firstFile.slice(0, 132).arrayBuffer());
+    if (header.length >= 132 &&
+        String.fromCharCode(header[128], header[129], header[130], header[131]) === 'DICM') {
+      return handleDicomFiles([firstFile]);
+    }
+  } catch { /* ignore */ }
+
+  showError('Unsupported file format. Please use NIfTI (.nii/.nii.gz), DICOM (.dcm), or image files (.png/.jpg).');
+}
+
+/**
+ * Handle a NIfTI file (.nii / .nii.gz).
+ */
+async function handleNiftiFile(file) {
   appState.fileName = file.name;
   appState.fileSize = file.size;
   showScreen('processing');
 
   const steps = [
-    'Parsing NIfTI header',
-    'Building brain mask',
-    'Extracting CSF voxels',
-    'Morphological filtering',
-    'Isolating ventricles',
-    'Computing Evans Index',
-    'Computing callosal angle',
-    'Computing volume',
-    'Generating report'
+    'Parsing NIfTI header', 'Building brain mask', 'Extracting CSF voxels',
+    'Morphological filtering', 'Isolating ventricles', 'Computing Evans Index',
+    'Computing callosal angle', 'Computing volume', 'Generating report'
   ];
   initProgress(steps);
 
-  // Show filename
   const fnEl = document.getElementById('processing-filename');
   if (fnEl) fnEl.textContent = file.name;
 
   try {
-    // Read file
     advanceProgress(0, 'Reading file...');
     const arrayBuffer = await file.arrayBuffer();
 
-    // Parse NIfTI
     advanceProgress(0, 'Decompressing & parsing NIfTI...');
     await delay(30);
     const volume = await NiftiReader.parse(arrayBuffer);
     appState.volume = volume;
 
-    // Run pipeline
     const results = await runPipeline(volume);
-
-    // Build results UI then switch screen
     buildResultsUI(results);
     showScreen('results');
-
   } catch (err) {
-    console.error('Pipeline error:', err);
+    console.error('NIfTI pipeline error:', err);
     showError(err.message || 'An error occurred during processing.');
   }
 }
+
+/**
+ * Handle one or more DICOM files (.dcm series).
+ */
+async function handleDicomFiles(files) {
+  appState.fileName = files.length > 1
+    ? `DICOM series (${files.length} files)`
+    : files[0].name;
+  appState.fileSize = files.reduce((sum, f) => sum + f.size, 0);
+  showScreen('processing');
+
+  const fnEl = document.getElementById('processing-filename');
+  if (fnEl) fnEl.textContent = appState.fileName;
+
+  try {
+    advanceProgress(0, `Reading ${files.length} DICOM file(s)...`);
+    const arrayBuffers = await Promise.all(files.map(f => f.arrayBuffer()));
+
+    advanceProgress(0, 'Parsing DICOM headers and pixel data...');
+    await delay(30);
+    const volume = await DicomReader.parseSeries(arrayBuffers);
+    appState.volume = volume;
+
+    const results = await runPipeline(volume);
+    buildResultsUI(results);
+    showScreen('results');
+  } catch (err) {
+    console.error('DICOM pipeline error:', err);
+    showError(err.message || 'Failed to parse DICOM files.');
+  }
+}
+
+/**
+ * Handle a single 2D image file (PNG/JPG/BMP).
+ */
+async function handleImageFile(file) {
+  appState.fileName = file.name;
+  appState.fileSize = file.size;
+  showScreen('processing');
+
+  const fnEl = document.getElementById('processing-filename');
+  if (fnEl) fnEl.textContent = file.name;
+
+  try {
+    advanceProgress(0, 'Loading image...');
+    const volume = await DicomReader.parseImage(file);
+    appState.volume = volume;
+
+    advanceProgress(0, 'Single 2D image — running limited analysis. Connect MedSAM2 for AI segmentation.');
+    const results = await runPipeline(volume);
+    buildResultsUI(results);
+    showScreen('results');
+  } catch (err) {
+    console.error('Image pipeline error:', err);
+    showError(err.message || 'Failed to process image.');
+  }
+}
+
+// Backward-compatible alias so any legacy callers still work
+function handleFile(file) {
+  return handleFiles([file]);
+}
+
 
 function showError(msg) {
   showScreen('upload');
@@ -913,6 +1032,15 @@ function buildResultsUI(results) {
   setMetricCard('card-nph', `${nphPct}%`,
     'NPH Probability', `${nphScore}/3 criteria`, nphScore >= 2 ? 'abnormal' : (nphScore === 1 ? 'moderate' : 'normal'));
 
+  // Segmentation method indicator
+  const methodEl = document.getElementById('segmentation-method-badge');
+  if (methodEl) {
+    const isMedSAM = appState.segmentationMethod === 'medsam2';
+    methodEl.textContent = isMedSAM ? 'AI (MedSAM2)' : 'Threshold';
+    methodEl.className = 'method-badge ' + (isMedSAM ? 'method-ai' : 'method-threshold');
+    methodEl.style.display = 'inline-flex';
+  }
+
   // Detailed measurements table
   buildMeasurementsTable(results);
 
@@ -954,6 +1082,7 @@ function buildMeasurementsTable(results) {
         <tr><td>Voxel Volume</td><td class="mono">${voxVolMm3.toFixed(4)}</td><td>mm³</td><td>—</td></tr>
         <tr><td>Volume (X×Y×Z)</td><td class="mono">${shape[0]}×${shape[1]}×${shape[2]}</td><td>voxels</td><td>—</td></tr>
         <tr><td>Spacing (X×Y×Z)</td><td class="mono">${spacing[0].toFixed(3)}×${spacing[1].toFixed(3)}×${spacing[2].toFixed(3)}</td><td>mm/voxel</td><td>—</td></tr>
+        <tr><td>Segmentation Method</td><td class="mono">${appState.segmentationMethod}</td><td>—</td><td>—</td></tr>
       </tbody>
     </table>
   `;
@@ -1104,17 +1233,21 @@ function resetApp() {
   appState.results = null;
   appState.currentAxialSlice = 0;
   appState.showMask = true;
+  appState.medsam2Box = null;
+  appState.segmentationMethod = 'threshold';
   showScreen('upload');
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   // File input
   const fileInput = document.getElementById('file-input');
-  const dropZone = document.getElementById('drop-zone');
+  const dropZone  = document.getElementById('drop-zone');
 
   if (fileInput) {
     fileInput.addEventListener('change', e => {
-      if (e.target.files.length > 0) handleFile(e.target.files[0]);
+      if (e.target.files && e.target.files.length > 0) {
+        handleFiles(e.target.files);
+      }
     });
   }
 
@@ -1134,8 +1267,9 @@ document.addEventListener('DOMContentLoaded', () => {
     dropZone.addEventListener('drop', e => {
       e.preventDefault();
       dropZone.classList.remove('drag-over');
-      const files = e.dataTransfer.files;
-      if (files.length > 0) handleFile(files[0]);
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        handleFiles(e.dataTransfer.files);
+      }
     });
   }
 
@@ -1145,10 +1279,61 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Sample data button
   const sampleBtn = document.getElementById('sample-btn');
-  if (sampleBtn) {
-    sampleBtn.addEventListener('click', loadSampleData);
+  if (sampleBtn) sampleBtn.addEventListener('click', loadSampleData);
+
+  // MedSAM2 server config
+  const serverUrlInput  = document.getElementById('server-url-input');
+  const checkServerBtn  = document.getElementById('check-server-btn');
+
+  if (serverUrlInput) {
+    serverUrlInput.addEventListener('change', () => {
+      const url = serverUrlInput.value.trim();
+      if (url) MedSAMClient.setServerUrl(url);
+      updateServerStatusUI(null); // reset status when URL changes
+    });
+  }
+
+  if (checkServerBtn) {
+    checkServerBtn.addEventListener('click', async () => {
+      const url = serverUrlInput ? serverUrlInput.value.trim() : '';
+      if (url) MedSAMClient.setServerUrl(url);
+
+      checkServerBtn.disabled = true;
+      checkServerBtn.textContent = 'Checking…';
+      updateServerStatusUI('checking');
+
+      const result = await MedSAMClient.checkHealth();
+      appState.medsam2Available = result.available;
+      updateServerStatusUI(result.available ? 'connected' : 'disconnected');
+
+      checkServerBtn.disabled = false;
+      checkServerBtn.textContent = 'Check Connection';
+    });
   }
 
   // Show upload screen
   showScreen('upload');
 });
+
+/**
+ * Update the server status indicator in the upload screen.
+ * state: 'connected' | 'disconnected' | 'checking' | null (unknown)
+ */
+function updateServerStatusUI(state) {
+  const el = document.getElementById('server-status');
+  if (!el) return;
+  el.className = 'server-status'; // reset classes
+  if (state === 'connected') {
+    el.classList.add('server-status-connected');
+    el.textContent = 'Connected';
+  } else if (state === 'disconnected') {
+    el.classList.add('server-status-disconnected');
+    el.textContent = 'Not reachable';
+  } else if (state === 'checking') {
+    el.classList.add('server-status-unknown');
+    el.textContent = 'Checking…';
+  } else {
+    el.classList.add('server-status-unknown');
+    el.textContent = 'Not connected';
+  }
+}

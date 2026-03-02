@@ -18,6 +18,9 @@
   <!-- pako for gzip decompression -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js" crossorigin="anonymous"></script>
 
+  <!-- dicom-parser for DICOM file support -->
+  <script src="https://unpkg.com/dicom-parser@1.8.21/dist/dicomParser.min.js"></script>
+
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
@@ -36,26 +39,43 @@
 
     <!-- Drop Zone -->
     <div id="drop-zone" class="drop-zone tap-target" role="button" tabindex="0"
-         aria-label="Upload a NIfTI head CT scan">
+         aria-label="Upload a head CT scan (NIfTI, DICOM, or image)">
       <div class="drop-icon">⬆</div>
       <div class="drop-title">Tap to select a head CT scan</div>
       <div class="drop-hint">
-        Or drag and drop your file here.<br>
-        No data ever leaves your device.
+        NIfTI, DICOM series, or image files.<br>
+        Or drag and drop your files here.
       </div>
       <div class="drop-formats">
         <span class="format-badge">.nii</span>
         <span class="format-badge">.nii.gz</span>
+        <span class="format-badge">.dcm</span>
+        <span class="format-badge">.png</span>
+        <span class="format-badge">.jpg</span>
       </div>
-      <input type="file" id="file-input" accept=".nii,.nii.gz,application/gzip"
-             style="display:none" aria-hidden="true">
+      <input type="file" id="file-input"
+             accept=".nii,.nii.gz,.dcm,application/gzip,application/dicom,image/png,image/jpeg"
+             multiple style="display:none" aria-hidden="true">
     </div>
 
     <!-- Privacy -->
     <div class="privacy-strip">
       <span class="privacy-icon">🔒</span>
-      <span><strong>100% Client-Side</strong> — All processing happens in your browser. Zero server uploads.</span>
+      <span><strong>Privacy First</strong> — Processing happens in your browser. Optional AI server for enhanced segmentation.</span>
     </div>
+
+    <!-- MedSAM2 Server Config (collapsible) -->
+    <details class="server-config">
+      <summary>AI Segmentation Server (optional)</summary>
+      <div class="server-config-inner">
+        <label for="server-url-input">MedSAM2 Server URL</label>
+        <input type="text" id="server-url-input" placeholder="http://localhost:5000" value=""
+               autocomplete="off" autocapitalize="none" spellcheck="false">
+        <div id="server-status" class="server-status server-status-unknown">Not connected</div>
+        <button id="check-server-btn" class="btn" style="margin-top:8px">Check Connection</button>
+        <p class="server-hint">When connected, AI-powered segmentation replaces the threshold pipeline for more accurate results.</p>
+      </div>
+    </details>
 
     <!-- Error display -->
     <div id="upload-error" class="upload-error" role="alert" aria-live="polite"></div>
@@ -68,7 +88,7 @@
 
     <!-- Footer -->
     <div class="upload-footer">
-      <div>Supports NIfTI-1 format · Head CT in Hounsfield Units</div>
+      <div>Supports NIfTI-1, DICOM series, PNG/JPG · Head CT in Hounsfield Units</div>
       <div style="margin-top:6px">
         Built by <strong style="color:var(--accent)">Matheus Machado Rech</strong>
       </div>
@@ -149,7 +169,9 @@
 
       <!-- ── B: Key Metrics ─────────────────────────────────────── -->
       <div>
-        <div class="section-header">Key Metrics</div>
+        <div class="section-header">Key Metrics
+          <span id="segmentation-method-badge" class="method-badge method-threshold" style="display:none">Threshold</span>
+        </div>
         <div class="metrics-grid">
           <div id="card-evans" class="metric-card metric-normal">
             <div class="metric-value mono">—</div>
@@ -280,7 +302,7 @@
     <!-- Footer -->
     <div class="results-footer">
       <div class="disclaimer">⚠ Research use only. Not for clinical diagnosis.</div>
-      <div class="version">HydroMorph v2.0.0</div>
+      <div class="version">HydroMorph v2.1.0</div>
       <div>Matheus Machado Rech</div>
       <div style="margin-top:4px">
         Data reference: CADS BrainCT-1mm (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a>)
@@ -291,6 +313,8 @@
 
   <!-- ─── Scripts ──────────────────────────────────────────────────── -->
   <script src="./nifti-reader.js"></script>
+  <script src="./dicom-reader.js"></script>
+  <script src="./medsam-client.js"></script>
   <script src="./app.js"></script>
 
   <script>
